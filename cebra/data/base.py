@@ -56,6 +56,7 @@ class Dataset(abc.ABC, cebra.io.HasDevice, cebra_data_masking.MaskedMixin):
                  download=False,
                  data_url=None,
                  data_checksum=None,
+                 gzipped_checksum=None,
                  location=None,
                  file_name=None):
 
@@ -65,6 +66,7 @@ class Dataset(abc.ABC, cebra.io.HasDevice, cebra_data_masking.MaskedMixin):
         self.download = download
         self.data_url = data_url
         self.data_checksum = data_checksum
+        self.gzipped_checksum = gzipped_checksum
         self.location = location
         self.file_name = file_name
 
@@ -83,7 +85,8 @@ class Dataset(abc.ABC, cebra.io.HasDevice, cebra_data_masking.MaskedMixin):
                 url=self.data_url,
                 expected_checksum=self.data_checksum,
                 location=self.location,
-                file_name=self.file_name)
+                file_name=self.file_name,
+                gzipped_checksum=self.gzipped_checksum)
 
     @property
     @abc.abstractmethod
@@ -287,8 +290,17 @@ class Loader(abc.ABC, cebra.io.HasDevice):
         """The total number of batches when iterating over the dataloader.""",
     )
 
-    batch_size: int = dataclasses.field(default=None,
-                                        doc="""The total batch size.""")
+    batch_size: int = dataclasses.field(
+        default=None,
+        doc=
+        """The total batch size. Number of reference and number of positive samples"""
+    )
+
+    batch_size_negatives: int = dataclasses.field(
+        default=None,
+        doc=
+        """Number of negative samples for a given batch. If None defaults to batch size"""
+    )
 
     def __post_init__(self):
         if self.num_steps is None or self.num_steps <= 0:
@@ -306,11 +318,12 @@ class Loader(abc.ABC, cebra.io.HasDevice):
 
     def __iter__(self) -> Batch:
         for _ in range(len(self)):
-            index = self.get_indices(num_samples=self.batch_size)
+            index = self.get_indices(num_samples=self.batch_size,
+                                     num_negatives=self.batch_size_negatives)
             yield self.dataset.load_batch(index)
 
     @abc.abstractmethod
-    def get_indices(self, num_samples: int):
+    def get_indices(self, num_samples: int, num_negatives: int = None):
         """Sample and return the specified number of indices.
 
         The elements of the returned `BatchIndex` will be used to index the

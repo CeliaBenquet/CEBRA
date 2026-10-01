@@ -1,4 +1,4 @@
-CEBRA_VERSION := 0.6.0a2
+CEBRA_VERSION := 0.6.1
 
 dist:
 	python3 -m pip install virtualenv
@@ -38,6 +38,21 @@ test_all: clean_test
 
 test_fast: clean_test
 	python -m pytest --ff --ignore cebra/grid_search.py -m "not requires_dataset" tests cebra --runfast
+
+# Reduced variant of the test suite. These tests should pass even if only the core package without any
+# addtional dataset/integration dependencies are installed.
+test_reduced: clean_test
+	python -m pytest --ff --ignore cebra/grid_search.py \
+		--ignore tests/test_attribution.py \
+		--ignore tests/test_dlc.py \
+		--ignore tests/test_grid_search.py \
+		--ignore tests/test_integration_xcebra.py \
+		--ignore tests/test_load.py \
+		--ignore tests/test_plotly.py \
+		--ignore cebra/attribution \
+		--ignore cebra/integrations \
+		-m "not requires_dataset" tests cebra --runfast
+
 
 # Run failed test firsts, using a single worker (for debugging)
 test_debug: clean_test

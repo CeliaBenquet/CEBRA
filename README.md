@@ -31,7 +31,7 @@
 
 To receive updates on code releases, please 👀 watch or ⭐️ star this repository!
 
-``cebra`` is a self-supervised method for non-linear clustering that allows for label-informed time series analysis.
+``cebra`` is a patented self-supervised method for non-linear clustering that allows for label-informed time series analysis.
 It can jointly use behavioral and neural data in a hypothesis- or discovery-driven manner to produce consistent, high-performance latent spaces. While it is not specific to neural and behavioral data, this is the first domain we used the tool in. This application case is to obtain a consistent representation of latent variables driving activity and behavior, improving decoding accuracy of behavioral variables over standard supervised learning, and obtaining embeddings which are robust to domain shifts.
 
 
@@ -42,6 +42,10 @@ It can jointly use behavioral and neural data in a hypothesis- or discovery-driv
 Steffen Schneider, Rodrigo González Laiz, Anastasiia Filipova, Markus Frey, Mackenzie Weygandt Mathis. AISTATS 2025.
 
 
+- 📄 **Publication April 2025**:
+  [Self-supervised contrastive learning performs non-linear system identification](https://arxiv.org/abs/2410.14673)
+  Rodrigo González Laiz*, Tobias Schmidt*, Steffen Schneider. ICLR 2025.
+
 - 📄 **Publication May 2023**:
   [Learnable latent embeddings for joint behavioural and neural analysis.](https://doi.org/10.1038/s41586-023-06031-6)
   Steffen Schneider*, Jin Hwa Lee* and Mackenzie Weygandt Mathis. Nature 2023.
@@ -49,6 +53,10 @@ Steffen Schneider, Rodrigo González Laiz, Anastasiia Filipova, Markus Frey, Mac
 - 📄 **Preprint April 2022**:
   [Learnable latent embeddings for joint behavioral and neural analysis.](https://arxiv.org/abs/2204.00673)
   Steffen Schneider*, Jin Hwa Lee* and Mackenzie Weygandt Mathis
+
+# Patent Information
+
+- [Dimensionality reduction of time-series data, and systems and devices that use the resultant embeddings](https://patents.google.com/patent/US12499131B2/en).  Steffen Schneider* & Mackenzie Weygandt Mathis*. Awarded Dec 2025. Please contact the [TTO office](adam.swetloff@epfl.ch) at EPFL for licensing.
 
 # License
 

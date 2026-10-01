@@ -21,14 +21,16 @@
 #
 """Define the CEBRA model."""
 
+import importlib.metadata
 import itertools
+import pickle
+import warnings
 from typing import (Callable, Dict, Iterable, List, Literal, Optional, Tuple,
                     Union)
 
 import numpy as np
 import numpy.typing as npt
 import packaging.version
-import importlib.metadata
 import sklearn
 import sklearn.utils.validation as sklearn_utils_validation
 import torch
@@ -38,6 +40,7 @@ from sklearn.utils.metaestimators import available_if
 from torch import nn
 
 import cebra.data
+import cebra.dynamics
 import cebra.integrations.sklearn
 import cebra.integrations.sklearn.dataset as cebra_sklearn_dataset
 import cebra.integrations.sklearn.utils as sklearn_utils
@@ -46,9 +49,17 @@ import cebra.solver
 
 # NOTE(stes): From torch 2.6 onwards, we need to specify the following list
 # when loading CEBRA models to allow weights_only = True.
+# NOTE(stes): "numpy.dtypes.Int32DType" was added due to this issue with
+# windows (https://github.com/AdaptiveMotorControlLab/CEBRA/pull/281#issuecomment-3764185072)
+# on build (windows-latest, torch 2.6.0, python 3.12, latest sklearn)
 CEBRA_LOAD_SAFE_GLOBALS = [
-    cebra.data.Offset, torch.torch_version.TorchVersion, np.dtype,
-    np.dtypes.Float64DType, np.dtypes.Int64DType
+    cebra.data.Offset,
+    torch.torch_version.TorchVersion,
+    np.dtype,
+    np.dtypes.Int32DType,
+    np.dtypes.Int64DType,
+    np.dtypes.Float32DType,
+    np.dtypes.Float64DType,
 ]
 
 
@@ -59,20 +70,22 @@ def check_version(estimator):
         sklearn.__version__) < packaging.version.parse("1.6.dev")
 
 
-def _safe_torch_load(filename, weights_only, **kwargs):
-    if weights_only is None:
-        if packaging.version.parse(
-                torch.__version__) >= packaging.version.parse("2.6.0"):
-            weights_only = True
-        else:
-            weights_only = False
+def _safe_torch_load(filename, weights_only=False, **kwargs):
+    checkpoint = None
+    legacy_mode = packaging.version.parse(
+        torch.__version__) < packaging.version.parse("2.6.0")
 
-    if not weights_only:
+    if legacy_mode:
         checkpoint = torch.load(filename, weights_only=False, **kwargs)
     else:
-        # NOTE(stes): This is only supported for torch 2.6+
         with torch.serialization.safe_globals(CEBRA_LOAD_SAFE_GLOBALS):
-            checkpoint = torch.load(filename, weights_only=True, **kwargs)
+            checkpoint = torch.load(filename,
+                                    weights_only=weights_only,
+                                    **kwargs)
+
+    if not isinstance(checkpoint, dict):
+        _check_type_checkpoint(checkpoint)
+        checkpoint = checkpoint._get_state_dict()
 
     return checkpoint
 
@@ -312,8 +325,9 @@ def _init_loader(
 
 def _check_type_checkpoint(checkpoint):
     if not isinstance(checkpoint, cebra.CEBRA):
-        raise RuntimeError("Model loaded from file is not compatible with "
-                           "the current CEBRA version.")
+        raise RuntimeError(
+            "Model loaded from file is not compatible with "
+            f"the current CEBRA version. Got: {type(checkpoint)}")
     if not sklearn_utils.check_fitted(checkpoint):
         raise ValueError(
             "CEBRA model is not fitted. Loading it is not supported.")
@@ -344,6 +358,7 @@ def _load_cebra_with_sklearn_backend(cebra_info: Dict) -> "CEBRA":
 
     args, state, state_dict = cebra_info['args'], cebra_info[
         'state'], cebra_info['state_dict']
+
     cebra_ = cebra.CEBRA(**args)
 
     for key, value in state.items():
@@ -377,24 +392,45 @@ def _load_cebra_with_sklearn_backend(cebra_info: Dict) -> "CEBRA":
     criterion = cebra_._prepare_criterion()
     criterion.to(state['device_'])
 
-    optimizer = torch.optim.Adam(
-        itertools.chain(model.parameters(), criterion.parameters()),
-        lr=args['learning_rate'],
-        **dict(args['optimizer_kwargs']),
-    )
+    # Create the dynamics model when the estimator was trained in DCL mode.
+    dynamics_model = cebra_._prepare_dynamics_model()
+    if dynamics_model is not None:
+        dynamics_model.to(state['device_'])
+
+    if dynamics_model is not None:
+        optimizer = torch.optim.Adam(
+            itertools.chain(model.parameters(), dynamics_model.parameters(),
+                            criterion.parameters()),
+            lr=args['learning_rate'],
+            **dict(args['optimizer_kwargs']),
+        )
+    else:
+        optimizer = torch.optim.Adam(
+            itertools.chain(model.parameters(), criterion.parameters()),
+            lr=args['learning_rate'],
+            **dict(args['optimizer_kwargs']),
+        )
+
+    solver_kwargs = {
+        "model": model,
+        "criterion": criterion,
+        "optimizer": optimizer,
+        "tqdm_on": args['verbose'],
+    }
+    if dynamics_model is not None:
+        solver_kwargs["dynamics_model"] = dynamics_model
 
     solver = cebra.solver.init(
         state['solver_name_'],
-        model=model,
-        criterion=criterion,
-        optimizer=optimizer,
-        tqdm_on=args['verbose'],
+        **solver_kwargs,
     )
     solver.load_state_dict(state_dict)
     solver.to(state['device_'])
 
     cebra_.model_ = model
     cebra_.solver_ = solver
+    if dynamics_model is not None:
+        cebra_.dynamics_model_ = dynamics_model
 
     return cebra_
 
@@ -491,6 +527,15 @@ class CEBRA(TransformerMixin, BaseEstimator):
         hybrid (bool):
             If ``True``, the model will be trained using both the time-contrastive and the selected
             behavior-constrastive loss functions. |Default:| ``False``.
+        full_denominator (bool):
+            If ``True``, the InfoNCE loss will use the full denominator formulation, which includes
+            the positive sample in the denominator of the softmax. This can improve numerical stability
+            and training dynamics in some cases. |Default:| ``False``.
+        dynamics_model_architecture (str):
+            If set, train with an auxiliary dynamics model applied to the reference samples, as in
+            Dynamics-aware Contrastive Learning (DCL). The value selects the dynamics model
+            architecture registered with :py:mod:`cebra.dynamics` (e.g. ``"linear"``). When ``None``,
+            no dynamics model is used and the estimator behaves as standard CEBRA. |Default:| ``None``.
         optimizer_kwargs (tuple):
             Additional optimization parameters. These have the form ``((key, value), (key, value))`` and
             are passed to the PyTorch optimizer specified through the ``optimizer`` argument. Refer to the
@@ -561,6 +606,7 @@ class CEBRA(TransformerMixin, BaseEstimator):
         max_iterations: int = 10000,
         max_adapt_iterations: int = 500,
         batch_size: int = None,
+        batch_size_negatives: int = None,
         learning_rate: float = 3e-4,
         optimizer: str = "adam",
         output_dimension: int = 8,
@@ -568,6 +614,8 @@ class CEBRA(TransformerMixin, BaseEstimator):
         num_hidden_units: int = 32,
         pad_before_transform: bool = True,
         hybrid: bool = False,
+        full_denominator: bool = False,
+        dynamics_model_architecture: Optional[str] = None,
         optimizer_kwargs: Tuple[Tuple[str, object], ...] = (
             ("betas", (0.9, 0.999)),
             ("eps", 1e-08),
@@ -727,6 +775,7 @@ class CEBRA(TransformerMixin, BaseEstimator):
             shared_kwargs=dict(
                 dataset=dataset,
                 batch_size=self.batch_size,
+                batch_size_negatives=self.batch_size_negatives,
                 num_steps=max_iterations,
             ),
             extra_kwargs=dict(
@@ -748,19 +797,25 @@ class CEBRA(TransformerMixin, BaseEstimator):
                     return cebra.models.LearnableCosineInfoNCE(
                         temperature=self.temperature,
                         min_temperature=self.min_temperature,
+                        full_denominator=self.full_denominator,
                     )
                 elif self.distance == "euclidean":
                     return cebra.models.LearnableEuclideanInfoNCE(
                         temperature=self.temperature,
                         min_temperature=self.min_temperature,
+                        full_denominator=self.full_denominator,
                     )
             elif self.temperature_mode == "constant":
                 if self.distance == "cosine":
                     return cebra.models.FixedCosineInfoNCE(
-                        temperature=self.temperature,)
+                        temperature=self.temperature,
+                        full_denominator=self.full_denominator,
+                    )
                 elif self.distance == "euclidean":
                     return cebra.models.FixedEuclideanInfoNCE(
-                        temperature=self.temperature,)
+                        temperature=self.temperature,
+                        full_denominator=self.full_denominator,
+                    )
 
         raise ValueError(f"Unknown similarity measure '{self.distance}' for "
                          f"criterion '{self.criterion}'.")
@@ -833,6 +888,7 @@ class CEBRA(TransformerMixin, BaseEstimator):
     def _select_model(self, X: Union[npt.NDArray, torch.Tensor],
                       session_id: int):
         if isinstance(X, np.ndarray):
+            X = cebra_sklearn_dataset._ensure_writable(X)
             X = torch.from_numpy(X)
         return self.solver_._select_model(X, session_id=session_id)
 
@@ -877,6 +933,20 @@ class CEBRA(TransformerMixin, BaseEstimator):
                     "Labels invalid: must have the same type of features as the ones used for fitting,"
                     f"expects {label_types_idx[0]}, got {y[i].dtype}.")
 
+    def _prepare_dynamics_model(self) -> Optional[torch.nn.Module]:
+        """Create the dynamics model when training in DCL mode.
+
+        Returns:
+            A dynamics model selected via :py:attr:`dynamics_model_architecture`, or ``None``
+            when no dynamics model is requested (i.e. standard CEBRA training).
+        """
+        if self.dynamics_model_architecture is None:
+            return None
+        return cebra.dynamics.init(
+            self.dynamics_model_architecture,
+            latent_dim=self.output_dimension,
+        )
+
     def _prepare_fit(
         self,
         X: Union[npt.NDArray, torch.Tensor],
@@ -913,10 +983,22 @@ class CEBRA(TransformerMixin, BaseEstimator):
 
         self._configure_for_all(dataset, model, is_multisession)
 
+        dynamics_model = self._prepare_dynamics_model()
+
         criterion = self._prepare_criterion()
         criterion.to(self.device_)
+
+        trainable_parameters = [model.parameters(), criterion.parameters()]
+        solver_kwargs = {}
+        if dynamics_model is not None:
+            dynamics_model.to(self.device_)
+            trainable_parameters.insert(1, dynamics_model.parameters())
+            solver_name = solver_name + "-dcl"
+            solver_kwargs["dynamics_model"] = dynamics_model
+            self.dynamics_model_ = dynamics_model
+
         optimizer = torch.optim.Adam(
-            itertools.chain(model.parameters(), criterion.parameters()),
+            itertools.chain(*trainable_parameters),
             lr=self.learning_rate,
             **dict(self.optimizer_kwargs),
         )
@@ -927,6 +1009,7 @@ class CEBRA(TransformerMixin, BaseEstimator):
             criterion=criterion,
             optimizer=optimizer,
             tqdm_on=self.verbose,
+            **solver_kwargs,
         )
         solver.to(self.device_)
         self.solver_name_ = solver_name
@@ -1002,11 +1085,22 @@ class CEBRA(TransformerMixin, BaseEstimator):
 
         self._configure_for_all(dataset, adapt_model, is_multisession)
 
+        # Reuse the existing dynamics model (it does not depend on input dimension).
+        dynamics_model = getattr(self, "dynamics_model_", None)
+
         criterion = self._prepare_criterion()
         criterion.to(self.device_)
 
+        trainable_parameters = list(adapt_model.parameters()) + list(
+            criterion.parameters())
+        solver_kwargs = {}
+        if dynamics_model is not None:
+            trainable_parameters += list(dynamics_model.parameters())
+            solver_name = solver_name + "-dcl"
+            solver_kwargs["dynamics_model"] = dynamics_model
+
         optimizer = torch.optim.Adam(
-            list(adapt_model.parameters()) + list(criterion.parameters()),
+            trainable_parameters,
             lr=self.learning_rate,
             **dict(self.optimizer_kwargs),
         )
@@ -1017,6 +1111,7 @@ class CEBRA(TransformerMixin, BaseEstimator):
             criterion=criterion,
             optimizer=optimizer,
             tqdm_on=self.verbose,
+            **solver_kwargs,
         )
         solver.to(self.device_)
 
@@ -1250,6 +1345,8 @@ class CEBRA(TransformerMixin, BaseEstimator):
 
         X = sklearn_utils.check_input_array(X, min_samples=len(self.offset_))
 
+        X = cebra_sklearn_dataset._ensure_writable(X)
+
         if isinstance(X, np.ndarray):
             X = torch.from_numpy(X)
 
@@ -1331,6 +1428,26 @@ class CEBRA(TransformerMixin, BaseEstimator):
         }
         return state
 
+    def _get_state_dict(self):
+        backend = "sklearn"
+        return {
+            'args': self.get_params(),
+            'state': self._get_state(),
+            'state_dict': self.solver_.state_dict(),
+            'metadata': {
+                'backend':
+                    backend,
+                'cebra_version':
+                    cebra.__version__,
+                'torch_version':
+                    torch.__version__,
+                'numpy_version':
+                    np.__version__,
+                'sklearn_version':
+                    importlib.metadata.distribution("scikit-learn").version
+            }
+        }
+
     def save(self,
              filename: str,
              backend: Literal["torch", "sklearn"] = "sklearn"):
@@ -1379,28 +1496,16 @@ class CEBRA(TransformerMixin, BaseEstimator):
         """
         if sklearn_utils.check_fitted(self):
             if backend == "torch":
+                warnings.warn(
+                    "Saving with backend='torch' is deprecated and will be removed in a future version. "
+                    "Please use backend='sklearn' instead.",
+                    DeprecationWarning,
+                    stacklevel=2,
+                )
                 checkpoint = torch.save(self, filename)
 
             elif backend == "sklearn":
-                checkpoint = torch.save(
-                    {
-                        'args': self.get_params(),
-                        'state': self._get_state(),
-                        'state_dict': self.solver_.state_dict(),
-                        'metadata': {
-                            'backend':
-                                backend,
-                            'cebra_version':
-                                cebra.__version__,
-                            'torch_version':
-                                torch.__version__,
-                            'numpy_version':
-                                np.__version__,
-                            'sklearn_version':
-                                importlib.metadata.distribution("scikit-learn"
-                                                              ).version
-                        }
-                    }, filename)
+                checkpoint = torch.save(self._get_state_dict(), filename)
             else:
                 raise NotImplementedError(f"Unsupported backend: {backend}")
         else:
@@ -1452,29 +1557,60 @@ class CEBRA(TransformerMixin, BaseEstimator):
             >>> tmp_file.unlink()
         """
         supported_backends = ["auto", "sklearn", "torch"]
+
         if backend not in supported_backends:
             raise NotImplementedError(
                 f"Unsupported backend: '{backend}'. Supported backends are: {', '.join(supported_backends)}"
             )
 
-        checkpoint = _safe_torch_load(filename, weights_only, **kwargs)
+        if backend not in ["auto", "sklearn"]:
+            warnings.warn(
+                "From CEBRA version 0.6.1 onwards, the 'backend' parameter in cebra.CEBRA.load is deprecated and will be ignored; "
+                "the sklearn backend is now always used. Models saved with the torch backend can still be loaded.",
+                category=DeprecationWarning,
+                stacklevel=2,
+            )
 
-        if backend == "auto":
-            backend = "sklearn" if isinstance(checkpoint, dict) else "torch"
+        backend = "sklearn"
 
-        if isinstance(checkpoint, dict) and backend == "torch":
-            raise RuntimeError(
-                "Cannot use 'torch' backend with a dictionary-based checkpoint. "
-                "Please try a different backend.")
-        if not isinstance(checkpoint, dict) and backend == "sklearn":
+        # NOTE(stes): For maximum backwards compatibility, we allow to load legacy checkpoints. From 0.7.0 onwards,
+        # the user will have to explicitly pass weights_only=False to load these checkpoints, following the changes
+        # introduced in torch 2.6.0.
+        try:
+            checkpoint = _safe_torch_load(filename, **kwargs)
+        except pickle.UnpicklingError as e:
+            if weights_only is not False:
+                if packaging.version.parse(
+                        cebra.__version__) < packaging.version.parse("0.7"):
+                    warnings.warn(
+                        "Failed to unpickle checkpoint with weights_only=True. "
+                        "Falling back to loading with weights_only=False. "
+                        "This is unsafe and should only be done if you trust the source of the model file. "
+                        "In the future, loading these checkpoints will only work if weights_only=False is explicitly passed.",
+                        category=UserWarning,
+                        stacklevel=2,
+                    )
+                else:
+                    raise ValueError(
+                        "Failed to unpickle checkpoint with weights_only=True. "
+                        "This may be due to an incompatible model file format. "
+                        "To attempt loading this checkpoint, please pass weights_only=False to CEBRA.load. "
+                        "Example: CEBRA.load(filename, weights_only=False)."
+                    ) from e
+
+            checkpoint = _safe_torch_load(filename,
+                                          weights_only=False,
+                                          **kwargs)
+
+        if backend != "sklearn":
+            raise ValueError(f"Unsupported backend: {backend}")
+
+        if not isinstance(checkpoint, dict):
             raise RuntimeError(
                 "Cannot use 'sklearn' backend a non dictionary-based checkpoint. "
-                "Please try a different backend.")
+                f"Please try a different backend. Got: {type(checkpoint)}")
 
-        if backend == "sklearn":
-            cebra_ = _load_cebra_with_sklearn_backend(checkpoint)
-        else:
-            cebra_ = _check_type_checkpoint(checkpoint)
+        cebra_ = _load_cebra_with_sklearn_backend(checkpoint)
 
         n_features = cebra_.n_features_
         cebra_.solver_.n_features = ([
@@ -1531,4 +1667,82 @@ class CEBRA(TransformerMixin, BaseEstimator):
         self.device = device
         self.solver_.model.to(device)
 
+        if hasattr(self, "dynamics_model_"):
+            self.dynamics_model_.to(device)
+
         return self
+
+
+class DCL(CEBRA):
+    """CEBRA preset for Dynamics-aware Contrastive Learning (DCL).
+
+    This is a thin convenience wrapper around :py:class:`CEBRA` that only changes the
+    default hyperparameters to sensible values for DCL: it enables a ``"linear"``
+    dynamics model on the reference samples, uses the full-denominator InfoNCE
+    formulation (positives are included in the softmax denominator), and samples more
+    negatives than positives per batch. All behaviour is implemented in :py:class:`CEBRA`;
+    instantiating ``DCL(...)`` is equivalent to calling
+    :py:class:`CEBRA` with these defaults, and every argument can still be overridden.
+    """
+
+    def __init__(
+        self,
+        model_architecture: str = "offset1-model",
+        device: str = "cuda_if_available",
+        criterion: str = "infonce",
+        distance: str = "cosine",
+        conditional: str = None,
+        temperature: float = 1.0,
+        temperature_mode: Literal["constant", "auto"] = "constant",
+        min_temperature: Optional[float] = 0.1,
+        time_offsets: int = 1,
+        delta: float = None,
+        max_iterations: int = 10000,
+        max_adapt_iterations: int = 500,
+        batch_size: int = 4096,
+        batch_size_negatives: int = 20000,
+        learning_rate: float = 3e-4,
+        optimizer: str = "adam",
+        output_dimension: int = 8,
+        verbose: bool = False,
+        num_hidden_units: int = 32,
+        pad_before_transform: bool = True,
+        hybrid: bool = False,
+        full_denominator: bool = True,
+        dynamics_model_architecture: Optional[str] = "linear",
+        optimizer_kwargs: Tuple[Tuple[str, object], ...] = (
+            ("betas", (0.9, 0.999)),
+            ("eps", 1e-08),
+            ("weight_decay", 0),
+            ("amsgrad", False),
+        ),
+        masking_kwargs: Tuple[Tuple[str, Union[float, List[float],
+                                               Tuple[float, ...]]], ...] = None,
+    ):
+        super().__init__(
+            model_architecture=model_architecture,
+            device=device,
+            criterion=criterion,
+            distance=distance,
+            conditional=conditional,
+            temperature=temperature,
+            temperature_mode=temperature_mode,
+            min_temperature=min_temperature,
+            time_offsets=time_offsets,
+            delta=delta,
+            max_iterations=max_iterations,
+            max_adapt_iterations=max_adapt_iterations,
+            batch_size=batch_size,
+            batch_size_negatives=batch_size_negatives,
+            learning_rate=learning_rate,
+            optimizer=optimizer,
+            output_dimension=output_dimension,
+            verbose=verbose,
+            num_hidden_units=num_hidden_units,
+            pad_before_transform=pad_before_transform,
+            hybrid=hybrid,
+            full_denominator=full_denominator,
+            dynamics_model_architecture=dynamics_model_architecture,
+            optimizer_kwargs=optimizer_kwargs,
+            masking_kwargs=masking_kwargs,
+        )

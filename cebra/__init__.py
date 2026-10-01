@@ -29,6 +29,7 @@ try:
     # TODO(stes): More common integrations people care about (e.g. PyTorch lightning)
     # could be added here.
     from cebra.integrations.sklearn.cebra import CEBRA
+    from cebra.integrations.sklearn.cebra import DCL
     from cebra.integrations.sklearn.decoder import KNNDecoder
     from cebra.integrations.sklearn.decoder import L1LinearRegressor
     from cebra.integrations.sklearn.decoder import MLPDecoder
@@ -67,8 +68,8 @@ except (ImportError, NameError):
 
 import cebra.integrations.sklearn as sklearn
 
-__version__ = "0.6.0a2"
-__all__ = ["CEBRA"]
+__version__ = "0.6.1"
+__all__ = ["CEBRA", "DCL"]
 __allow_lazy_imports = False
 __lazy_imports = {}
 
@@ -92,6 +93,10 @@ def __getattr__(key):
         from cebra.integrations.sklearn.cebra import CEBRA
 
         return CEBRA
+    elif key == "DCL":
+        from cebra.integrations.sklearn.cebra import DCL
+
+        return DCL
     elif key == "KNNDecoder":
         from cebra.integrations.sklearn.decoder import KNNDecoder  # noqa: F811
 

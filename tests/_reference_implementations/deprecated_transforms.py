@@ -11,8 +11,8 @@ import cebra.integrations.sklearn.utils as sklearn_utils
 import cebra.models
 
 
-#NOTE: Deprecated: transform is now handled in the solver but the original
-#      method is kept here for testing.
+#NOTE(celia): Deprecated: transform is now handled in the solver but the original
+#      method is kept here for testing consistency.
 def cebra_transform_deprecated(cebra_model,
                                X: Union[npt.NDArray, torch.Tensor],
                                session_id: Optional[int] = None) -> npt.NDArray:
@@ -38,12 +38,6 @@ def cebra_transform_deprecated(cebra_model,
         >>> embedding = cebra_model.transform(dataset)
 
     """
-    warnings.warn(
-        "The method is deprecated "
-        "but kept for testing puroposes."
-        "We recommend using `transform` instead.",
-        DeprecationWarning,
-        stacklevel=2)
 
     sklearn_utils_validation.check_is_fitted(cebra_model, "n_features_")
 
@@ -78,9 +72,9 @@ def cebra_transform_deprecated(cebra_model,
     return output
 
 
-# NOTE: Deprecated: batched transform can now be performed (more memory efficient)
+# NOTE(celia): Deprecated: batched transform can now be performed (more memory efficient)
 #       using the transform method of the model, and handling padding is implemented
-#       directly in the base Solver. This method is kept for testing purposes.
+#       directly in the base Solver. This method is kept for testing consistency.
 @torch.no_grad()
 def multiobjective_transform_deprecated(solver: "cebra.solvers.Solver",
                                         inputs: torch.Tensor) -> torch.Tensor:
@@ -96,7 +90,7 @@ def multiobjective_transform_deprecated(solver: "cebra.solvers.Solver",
 
     warnings.warn(
         "The method is deprecated "
-        "but kept for testing puroposes."
+        "but kept for testing purposes."
         "We recommend using `transform` instead.",
         DeprecationWarning,
         stacklevel=2)
