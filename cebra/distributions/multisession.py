@@ -31,7 +31,28 @@ import torch
 import cebra.distributions as cebra_distr
 import cebra.io
 
-_device = cebra.io.device()
+
+def _resolve_device(dataset, device: Optional[str] = None) -> str:
+    def _normalize_cuda_device(device_name: str) -> str:
+        if device_name != "cuda":
+            return device_name
+
+        # Prefer the concrete device index from dataset tensors if available.
+        if hasattr(dataset, "continuous_index"):
+            idx_device = dataset.continuous_index.device
+            if idx_device.type == "cuda" and idx_device.index is not None:
+                return f"cuda:{idx_device.index}"
+
+        # Fall back to currently selected CUDA device instead of implicit cuda:0.
+        if torch.cuda.is_available():
+            return f"cuda:{torch.cuda.current_device()}"
+        return device_name
+
+    if device is not None:
+        return _normalize_cuda_device(str(device))
+    if hasattr(dataset, "device"):
+        return _normalize_cuda_device(str(dataset.device))
+    return _normalize_cuda_device(cebra.io.device())
 
 
 def _search(data, query):
@@ -145,8 +166,9 @@ class MultisessionSampler(cebra_distr.PriorDistribution,
         * Add better CUDA support and refactor ``numpy`` implementation.
     """
 
-    def __init__(self, dataset, time_offset):
+    def __init__(self, dataset, time_offset, device: Optional[str] = None):
         self.dataset = dataset
+        self.device = _resolve_device(dataset, device)
 
         # TODO(stes): implement in pytorch
         self.all_data = self.dataset.continuous_index.cpu().numpy()
@@ -158,18 +180,21 @@ class MultisessionSampler(cebra_distr.PriorDistribution,
 
         # TODO(stes): unify naming
         time_delta = time_offset
-        self.time_difference = (torch.cat(
-            [
-                dataset.continuous_index[time_delta:] -
-                dataset.continuous_index[:-time_delta]
-                for dataset in self.dataset.iter_sessions()
-            ],
-            dim=0,
-        ).cpu().numpy())
+
+        # NOTE(celia): Keep this on CPU: a previous CUDA torch.cat here could OOM due to
+        # large temporary allocations when concatenating across many sessions.
+        time_differences = []
+        for dataset in self.dataset.iter_sessions():
+            continuous_index = dataset.continuous_index
+            if continuous_index.device.type != "cpu":
+                continuous_index = continuous_index.cpu()
+            time_differences.append((continuous_index[time_delta:] -
+                                     continuous_index[:-time_delta]).numpy())
+        self.time_difference = np.concatenate(time_differences, axis=0)
 
         self.index = [
             cebra_distr.ContinuousIndex(
-                dataset.continuous_index.float().to(_device))
+                dataset.continuous_index.float().to(self.device))
             for dataset in self.dataset.iter_sessions()
         ]
 
@@ -247,9 +272,9 @@ class MultisessionSampler(cebra_distr.PriorDistribution,
 
         # TODO this part fails in Pytorch
         query = query[idx.reshape(s)]
-        query = torch.from_numpy(query).to(_device)
+        query = torch.from_numpy(query).to(self.device)
 
-        pos_idx = torch.zeros(shape, device=_device).long()
+        pos_idx = torch.zeros(shape, device=self.device).long()
         for i in range(self.num_sessions):
             pos_idx[i] = self.index[i].search(query[i])
         pos_idx = pos_idx.cpu().numpy()
@@ -281,8 +306,9 @@ class DiscreteMultisessionSampler(cebra_distr.PriorDistribution,
         * Add better CUDA support and refactor ``numpy`` implementation.
     """
 
-    def __init__(self, dataset):
+    def __init__(self, dataset, device: Optional[str] = None):
         self.dataset = dataset
+        self.device = _resolve_device(dataset, device)
 
         # TODO(stes): implement in pytorch
         self.all_data = self.dataset.discrete_index.cpu().numpy()
@@ -294,7 +320,7 @@ class DiscreteMultisessionSampler(cebra_distr.PriorDistribution,
 
         self.index = [
             cebra_distr.DiscreteUniform(
-                dataset.discrete_index.int().to(_device))
+                dataset.discrete_index.int().to(self.device))
             for dataset in self.dataset.iter_sessions()
         ]
 
@@ -370,10 +396,10 @@ class DiscreteMultisessionSampler(cebra_distr.PriorDistribution,
         # TODO this part fails in Pytorch
         # apply shuffle
         query = query[idx.reshape(s)]
-        query = torch.from_numpy(query).to(_device)
+        query = torch.from_numpy(query).to(self.device)
 
         # sample conditional for each assigned session
-        pos_idx = torch.zeros(shape, device=_device).long()
+        pos_idx = torch.zeros(shape, device=self.device).long()
         for i in range(self.num_sessions):
             pos_idx[i] = self.index[i].sample_conditional(query[i])
         pos_idx = pos_idx.cpu().numpy()
@@ -496,6 +522,10 @@ class UnifiedSampler(MultisessionSampler):
             aligned: If True, no time difference is added to the query. Otherwise, a
                 random time difference is added to the query.
         """
+
+        # self.all_data is numpy-backed, so ensure indices are on host before indexing.
+        if torch.is_tensor(reference_idx):
+            reference_idx = reference_idx.detach().cpu().numpy()
         cum_idx = reference_idx + self.lengths[session_id]
         if aligned:
             query = self.all_data[cum_idx]
@@ -503,7 +533,7 @@ class UnifiedSampler(MultisessionSampler):
             diff_idx = torch.randint(len(self.time_difference),
                                      (len(reference_idx),))
             query = self.all_data[cum_idx] + self.time_difference[diff_idx]
-        return torch.from_numpy(query).to(_device)
+        return torch.from_numpy(query).to(self.device)
 
     def sample_all_sessions(self, ref_idx: torch.Tensor,
                             session_id: int) -> torch.Tensor:
@@ -535,7 +565,7 @@ class UnifiedSampler(MultisessionSampler):
         # cum_ref_idx: (num_samples, ), values of ref_idx, switched to correspond to the indexes in
         # of session_id, in the flatten array self.all_data.
         all_idx = torch.zeros(self.num_sessions, len(ref_idx),
-                              device=_device).long()
+                              device=self.device).long()
         query = self._get_query(
             reference_idx=ref_idx, session_id=session_id,
             aligned=True)  # same query for all + no time diff added
@@ -578,8 +608,8 @@ class UnifiedSampler(MultisessionSampler):
         """
 
         cond_idx = torch.zeros((reference_idx.shape[0], reference_idx.shape[1]),
-                               dtype=torch.int,
-                               device=_device).long()
+                       dtype=torch.int,
+                       device=self.device).long()
 
         for session_id in range(self.num_sessions):
             query = self._get_query(reference_idx=reference_idx[session_id],

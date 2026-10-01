@@ -779,7 +779,8 @@ class Solver(abc.ABC, cebra.io.HasDevice):
     def load(self,
              logdir: str,
              filename: str = "checkpoint.pth",
-             weights_only: bool = False):
+             weights_only: bool = False,
+             map_location=None):
         """Load the experiment from its checkpoint file.
 
         Args:
@@ -791,6 +792,8 @@ class Solver(abc.ABC, cebra.io.HasDevice):
                 at the default value of ``None``, which sets the argument to ``False`` for torch<2.6, and ``True`` for
                 higher versions of torch. If you experience issues with loading custom models (specified outside
                 of the CEBRA package), you can try to set this to ``False`` if you trust the source of the model.
+            map_location: Optional location passed to :py:func:`torch.load`.
+                If not provided, checkpoints are remapped to the current model device.
         """
 
         savepath = os.path.join(logdir, filename)
@@ -798,7 +801,14 @@ class Solver(abc.ABC, cebra.io.HasDevice):
             print("Did not find a previous experiment. Starting from scratch.")
             return
 
-        checkpoint = _safe_torch_load(savepath, weights_only)
+        if map_location is None:
+            map_location = next(self.model.parameters()).device
+
+        checkpoint = _safe_torch_load(
+            savepath,
+            weights_only,
+            map_location=map_location,
+        )
 
         #checkpoint = torch.load(savepath, map_location=self.device, weights_only=weights_only)
         self.load_state_dict(checkpoint, strict=True)
