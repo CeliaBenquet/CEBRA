@@ -655,7 +655,8 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
                   pad_before_transform: bool = True,
                   session_id: Optional[int] = None,
                   batch_size: Optional[int] = 512,
-                  split_outputs: bool = False) -> torch.Tensor:
+                  split_outputs: bool = False,
+                  random_ties: bool = False) -> torch.Tensor:
         """Compute the embedding for the `session_id`th session of the dataset.
 
         For unified multiobjective training, the embedding is computed using the shared
@@ -672,6 +673,9 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
             split_outputs: Whether to return per-objective outputs (True) or concatenated
                           output (False, default). If True, returns a tuple of embeddings
                           one per objective.
+            random_ties: Break nearest-label ties uniformly at random when aligning the other
+                          sessions to ``session_id`` (``UnifiedSampler.random_ties``). Default
+                          ``False`` keeps the first tie. Set it to match how the model was trained.
 
         Returns:
             If split_outputs=False: The output embedding for the session corresponding to
@@ -706,6 +710,7 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
 
             # Use UnifiedLoader for sampling
             loader = cebra.data.UnifiedLoader(dataset, num_steps=1).to(transform_device)
+            loader.sampler.random_ties = bool(random_ties)
 
             # Set split_outputs to specified value
             self.model.set_split_outputs(split_outputs)
@@ -771,7 +776,8 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
                          labels,
                          start: int,
                          end: int,
-                         session_id: Optional[int] = None) -> torch.Tensor:
+                         session_id: Optional[int] = None,
+                         random_ties: bool = False) -> torch.Tensor:
         """Get data aligned across sessions for the specified session ID and index range.
         
         Args:
@@ -793,6 +799,7 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
 
         # Use UnifiedLoader for sampling
         loader = cebra.data.UnifiedLoader(dataset, num_steps=1)
+        loader.sampler.random_ties = bool(random_ties)
 
         # Sample indices from all sessions aligned to the target session
         refs_idx_batch = loader.sampler.sample_all_sessions(

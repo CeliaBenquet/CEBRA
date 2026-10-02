@@ -26,6 +26,7 @@ import numpy as np
 import pytest
 import torch
 
+import cebra.data
 import cebra.datasets as cebra_datasets
 import cebra.distributions as cebra_distr
 import cebra.distributions.base as cebra_distr_base
@@ -424,3 +425,47 @@ def test_unified_distribution(time_offset):
 
     positive = sampler.sample_conditional(sample)
     assert positive.shape == (dataset.num_sessions, num_samples)
+
+
+def _tiled_unified_dataset(n_frames=50, n_repeats=6, n_sessions=3, seed=0):
+    """Sessions whose labels repeat exactly on every trial (same stimulus frame each repeat)."""
+    gen = torch.Generator().manual_seed(seed)
+    labels = torch.randn(n_frames, 4, generator=gen).repeat(n_repeats, 1)
+    sessions = [
+        cebra.data.TensorDataset(neural=torch.randn(n_frames * n_repeats, 3 + i, generator=gen),
+                                 continuous=labels.clone()) for i in range(n_sessions)
+    ]
+    return cebra.data.UnifiedDataset(*sessions), labels
+
+
+def test_unified_sampler_default_returns_first_tie():
+    dataset, _ = _tiled_unified_dataset()
+    sampler = cebra_distr.UnifiedSampler(dataset, time_offset=1)
+    ref = sampler.sample_prior(200, session_id=0)
+    # every non-reference session is matched on the first trial: argmin returns the earliest tie
+    assert (ref[1:] < 50).all()
+    assert (sampler.sample_conditional(ref) < 50).all()
+
+
+@pytest.mark.parametrize("set_after_init", [False, True])
+def test_unified_sampler_random_ties_uses_every_repeat(set_after_init):
+    n_frames, n_repeats = 50, 6
+    dataset, labels = _tiled_unified_dataset(n_frames, n_repeats)
+    if set_after_init:
+        sampler = cebra_distr.UnifiedSampler(dataset, time_offset=1)
+        sampler.random_ties = True
+    else:
+        sampler = cebra_distr.UnifiedSampler(dataset, time_offset=1, random_ties=True)
+    np.random.seed(0)
+    torch.manual_seed(0)
+    ref = sampler.sample_prior(3000, session_id=0)
+    pos = sampler.sample_conditional(ref)
+    for idx in (ref[1:], pos):
+        repeats = np.bincount((np.asarray(idx) // n_frames).ravel(), minlength=n_repeats)
+        # spread over all repeats, roughly uniformly
+        assert (repeats > 0).all()
+        assert repeats.min() / repeats.max() > 0.7
+    # matched samples are still exact label matches of the reference frame
+    ref_frame = ref[0] % n_frames
+    for s in range(1, ref.shape[0]):
+        assert torch.equal(labels[ref[s]], labels[ref_frame])

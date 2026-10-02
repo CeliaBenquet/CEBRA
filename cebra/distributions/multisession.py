@@ -464,6 +464,39 @@ class UnifiedSampler(MultisessionSampler):
 
     """
 
+    def __init__(self,
+                 dataset,
+                 time_offset,
+                 device: Optional[str] = None,
+                 random_ties: bool = False,
+                 tie_rtol: float = 1e-6):
+        """
+        Args:
+            random_ties: If ``True``, every nearest-label search (the matched samples of the
+                non-reference sessions in :py:meth:`sample_all_sessions`, and the positives of
+                every session in :py:meth:`sample_conditional`) picks uniformly at random among
+                all timepoints whose label is equally close to the query, instead of the first
+                one. Needed whenever labels repeat exactly within a session -- e.g. the same
+                stimulus frame shown on several trials -- where ``argmin`` always returns the
+                earliest trial. Can also be set after construction (``sampler.random_ties``).
+                Default ``False`` keeps the original behaviour.
+            tie_rtol: Relative tolerance for two distances to count as tied (absorbs float
+                rounding in the distance computation).
+        """
+        super().__init__(dataset, time_offset, device=device)
+        self.random_ties = random_ties
+        self.tie_rtol = tie_rtol
+
+    def _search(self, session_id: int, query: torch.Tensor) -> torch.Tensor:
+        """Nearest-label search in one session, ties broken as set by ``random_ties``."""
+        if not self.random_ties:
+            return self.index[session_id].search(query)
+        distance = self.index[session_id].dist_matrix(query)  # (session length, num queries)
+        dmin = distance.min(dim=0, keepdim=True).values
+        tied = distance <= dmin + self.tie_rtol * dmin.abs().clamp_min(1.0)
+        scores = torch.rand(distance.shape, device=distance.device)
+        return scores.masked_fill(~tied, -1.0).argmax(dim=0)
+
     def sample_all_uniform_prior(self, num_samples: int) -> npt.NDArray:
         """Returns uniformly sampled index for all sessions of the dataset.
 
@@ -580,8 +613,7 @@ class UnifiedSampler(MultisessionSampler):
             #                        aligned=False)
 
             # get the idx of the datapoint that is the closest to the query
-            all_idx[i] = self.index[i].search(
-                query)  # search in the whole dataset
+            all_idx[i] = self._search(i, query)  # search in the whole dataset
 
             # all_idx[i] = self.index[i].search_or_mask(
             #     query, threshold=self.distance_threshold[i])
@@ -615,6 +647,6 @@ class UnifiedSampler(MultisessionSampler):
             query = self._get_query(reference_idx=reference_idx[session_id],
                                     session_id=session_id)
 
-            cond_idx[session_id] = self.index[session_id].search(query)
+            cond_idx[session_id] = self._search(session_id, query)
 
         return cond_idx.cpu().numpy()

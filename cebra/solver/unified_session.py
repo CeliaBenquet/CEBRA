@@ -195,7 +195,8 @@ class UnifiedSolver(abc_.Solver):
                   labels: List[torch.Tensor],
                   pad_before_transform: bool = True,
                   session_id: Optional[int] = None,
-                  batch_size: Optional[int] = 512) -> torch.Tensor:
+                  batch_size: Optional[int] = 512,
+                  random_ties: bool = False) -> torch.Tensor:
         """Compute the embedding for the `session_id`th session of the dataset.
 
         Note:
@@ -208,6 +209,8 @@ class UnifiedSolver(abc_.Solver):
             session_id: The session ID, an :py:class:`int` between 0 and
                 the number of sessions -1.
             batch_size: If not None, batched inference will be applied.
+            random_ties: Break nearest-label ties uniformly at random when aligning the other
+                sessions (``UnifiedSampler.random_ties``). Default ``False`` keeps the first tie.
 
         Note:
             The ``session_id`` is needed in order to sample the corresponding number of samples and
@@ -238,6 +241,7 @@ class UnifiedSolver(abc_.Solver):
 
         # Only used to sample the reference samples
         loader = cebra.data.UnifiedLoader(dataset, num_steps=1)
+        loader.sampler.random_ties = bool(random_ties)
 
         # Sampling in batch
         refs_data_batch_embeddings = []
