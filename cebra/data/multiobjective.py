@@ -228,7 +228,10 @@ class UnifiedContrastiveMultiObjectiveLoader(cebra_data.Loader):
                 "UnifiedDataset must have 'continuous_index' attribute."
             )
         
-        #TODO: adapt to more labels!
+        # Not handled: the sampler always uses the loader's ``time_offset``
+        # (default 10), not ``kwargs['time_delta']``, and always samples on the dataset's primary
+        # ``continuous_index``; per-objective labels (``label_name`` / ``add_labels``) are ignored.
+        # Every current launcher passes time_delta=10, so the two agree.
         distribution = cebra.distributions.UnifiedSampler(
             self.dataset,
             self.time_offset,

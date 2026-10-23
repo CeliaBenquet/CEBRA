@@ -468,7 +468,7 @@ class UnifiedSampler(MultisessionSampler):
                  dataset,
                  time_offset,
                  device: Optional[str] = None,
-                 random_ties: bool = False,
+                 random_ties: bool = True,
                  tie_rtol: float = 1e-6):
         """
         Args:
@@ -479,7 +479,7 @@ class UnifiedSampler(MultisessionSampler):
                 one. Needed whenever labels repeat exactly within a session -- e.g. the same
                 stimulus frame shown on several trials -- where ``argmin`` always returns the
                 earliest trial. Can also be set after construction (``sampler.random_ties``).
-                Default ``False`` keeps the original behaviour.
+                Default ``True``; ``False`` restores the legacy first-tie behaviour.
             tie_rtol: Relative tolerance for two distances to count as tied (absorbs float
                 rounding in the distance computation).
         """

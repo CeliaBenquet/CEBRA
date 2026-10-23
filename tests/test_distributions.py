@@ -438,9 +438,14 @@ def _tiled_unified_dataset(n_frames=50, n_repeats=6, n_sessions=3, seed=0):
     return cebra.data.UnifiedDataset(*sessions), labels
 
 
-def test_unified_sampler_default_returns_first_tie():
+def test_unified_sampler_random_ties_default_is_true():
     dataset, _ = _tiled_unified_dataset()
-    sampler = cebra_distr.UnifiedSampler(dataset, time_offset=1)
+    assert cebra_distr.UnifiedSampler(dataset, time_offset=1).random_ties is True
+
+
+def test_unified_sampler_first_tie_when_random_ties_false():
+    dataset, _ = _tiled_unified_dataset()
+    sampler = cebra_distr.UnifiedSampler(dataset, time_offset=1, random_ties=False)
     ref = sampler.sample_prior(200, session_id=0)
     # every non-reference session is matched on the first trial: argmin returns the earliest tie
     assert (ref[1:] < 50).all()

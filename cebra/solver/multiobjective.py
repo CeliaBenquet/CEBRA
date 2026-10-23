@@ -656,7 +656,7 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
                   session_id: Optional[int] = None,
                   batch_size: Optional[int] = 512,
                   split_outputs: bool = False,
-                  random_ties: bool = False) -> torch.Tensor:
+                  random_ties: bool = True) -> torch.Tensor:
         """Compute the embedding for the `session_id`th session of the dataset.
 
         For unified multiobjective training, the embedding is computed using the shared
@@ -675,7 +675,7 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
                           one per objective.
             random_ties: Break nearest-label ties uniformly at random when aligning the other
                           sessions to ``session_id`` (``UnifiedSampler.random_ties``). Default
-                          ``False`` keeps the first tie. Set it to match how the model was trained.
+                          ``True``; ``False`` restores the legacy first-tie behaviour.
 
         Returns:
             If split_outputs=False: The output embedding for the session corresponding to
@@ -777,7 +777,7 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
                          start: int,
                          end: int,
                          session_id: Optional[int] = None,
-                         random_ties: bool = False) -> torch.Tensor:
+                         random_ties: bool = True) -> torch.Tensor:
         """Get data aligned across sessions for the specified session ID and index range.
         
         Args:
@@ -786,6 +786,8 @@ class UnifiedMultiobjectiveSolverxCEBRA(MultiobjectiveSolverBase):
             start: Start index for the target session.
             end: End index for the target session.
             session_id: The target session ID to align to.
+            random_ties: Break nearest-label ties uniformly at random (``UnifiedSampler.random_ties``).
+                Default ``True``; ``False`` restores the legacy first-tie behaviour.
         
         Returns:
             A tensor of data aligned across sessions for the specified session ID and index range.
